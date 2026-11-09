@@ -34,36 +34,91 @@ enum ClickSynth {
         }
     }
 
-    // MARK: - 木鱼
+    // MARK: - 木鱼（基于物理声学特征重调）
+    //
+    // 声学特征：
+    // 1. 分音结构：主共鸣基频 900 Hz，非整数倍分音 2.7x (2430 Hz) 和 5.1x (4590 Hz)，
+    //    分音增益分别为 0.5 和 0.2，衰减速度为基频的 2 倍（非整数谐波列，纯正木质声）。
+    // 2. 衰减：整段时长 100 ms，包络采用 28 ms 陡峭指数衰减，尾部在 80-100 ms 平滑收住，无嗡嗡余音。
+    // 3. 敲击起音：前 3-6 ms 叠加 3.2 kHz 带通滤波短噪声脉冲，提供短脆干的"笃"起音声。
+    // 4. 起音滑音：前 10 ms 频率由 1.08x 滑落至基频，模拟木质腔体受击形变。
+    // 5. 响度：相比原版提升约 3 dB，中频厚实干脆，能清晰穿透音乐。
 
-    /// 正弦衰减叠加（木质共振模态）+ 极短高频瞬态。
     private static func woodblock(accent: Bool) -> [Float] {
-        let duration = 0.090
+        let duration = 0.100 // 100 ms
         let count = Int(duration * sampleRate)
         var out = [Float](repeating: 0, count: count)
-        let pitch: Double = accent ? 1.35 : 1.0
-        // (频率, 幅度, 衰减时间常数 秒)
-        let modes: [(Double, Double, Double)] = [
-            (860 * pitch, 1.00, 0.018),
-            (1_720 * pitch, 0.55, 0.012),
-            (2_650 * pitch, 0.30, 0.007),
-            (3_900 * pitch, 0.12, 0.004)
+
+        let f0: Double = 900.0
+        let tau0: Double = 0.028 // 基频衰减时间常数 28 ms
+        let tau1: Double = tau0 * 0.5 // 分音衰减快一倍 (14 ms)
+        let tau2: Double = tau0 * 0.5
+
+        let modes: [(ratio: Double, amp: Double, tau: Double)] = [
+            (1.0, 1.0, tau0),
+            (2.7, 0.5, tau1),
+            (5.1, 0.2, tau2)
         ]
-        var rng = LCG(seed: accent ? 7 : 3)
+
+        // 3.2 kHz 带通双二阶滤波器 (Q=2.0)
+        let fc = 3200.0
+        let Q = 2.0
+        let w0 = 2.0 * .pi * fc / sampleRate
+        let alpha = sin(w0) / (2.0 * Q)
+        let b0 = alpha / (1.0 + alpha)
+        let b1 = 0.0
+        let b2 = -alpha / (1.0 + alpha)
+        let a1 = (-2.0 * cos(w0)) / (1.0 + alpha)
+        let a2 = (1.0 - alpha) / (1.0 + alpha)
+
+        var rng = LCG(seed: accent ? 87654321 : 12345678)
+        var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0
+        var filteredNoise = [Double](repeating: 0, count: count)
+        for i in 0..<count {
+            let x0 = rng.nextSigned()
+            let y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+            filteredNoise[i] = y0
+            x2 = x1; x1 = x0
+            y2 = y1; y1 = y0
+        }
+
+        var phi0: Double = 0.0
         for i in 0..<count {
             let t = Double(i) / sampleRate
+
+            // 起音前 10 ms 瞬态滑音 (1.08 -> 1.00)
+            let pitchDrop = 0.08 * exp(-t / 0.003)
+            let instF0 = f0 * (1.0 + pitchDrop)
+            phi0 += 2.0 * .pi * instF0 / sampleRate
+
+            // 非整数分音叠加
             var v = 0.0
-            for (f, a, tau) in modes {
-                v += a * sin(2 * .pi * f * t) * exp(-t / tau)
+            for m in modes {
+                let phi = phi0 * m.ratio
+                let decay = exp(-t / m.tau)
+                v += m.amp * sin(phi) * decay
             }
-            // 高频微瞬态：约 1.5ms 的噪声爆发
-            let transient = rng.nextSigned() * exp(-t / 0.0006) * 0.35
-            v += transient
-            // 2ms 起音渐入，避免爆音
-            let attack = min(1.0, t / 0.0005)
-            out[i] = Float(v * attack)
+
+            // 起音短噪声脉冲 (前 3-6 ms)
+            let noiseEnvelope = t < 0.008 ? exp(-t / 0.0012) : 0.0
+            let noiseVal = filteredNoise[i] * noiseEnvelope * 0.75
+            v += noiseVal
+
+            // 0.2 ms 极快渐入防爆音
+            let attack = min(1.0, t / 0.0002)
+            v *= attack
+
+            // 80-100 ms 干净平滑收尾，消除余音
+            if t > 0.075 {
+                let fade = max(0.0, (duration - t) / (duration - 0.075))
+                v *= (fade * fade)
+            }
+
+            out[i] = Float(v)
         }
-        return normalize(out, peak: accent ? 0.95 : 0.70)
+
+        // 提高增益与响度（普通版 peak 0.82，重音版 0.98）
+        return normalize(out, peak: accent ? 0.98 : 0.82)
     }
 
     // MARK: - 电子咔哒
@@ -92,7 +147,7 @@ enum ClickSynth {
             let attack = min(1.0, t / 0.0002)
             out[i] = Float(v * attack)
         }
-        return normalize(out, peak: accent ? 0.95 : 0.70)
+        return normalize(out, peak: accent ? 0.98 : 0.82)
     }
 
     // MARK: - 工具
