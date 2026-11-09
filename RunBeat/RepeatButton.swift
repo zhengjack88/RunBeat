@@ -4,6 +4,8 @@ import SwiftUI
 /// 重复由 Task.sleep 驱动，仅用于 UI 数值调整，与节拍发声无关。
 struct RepeatButton: View {
     let systemImage: String
+    var size: CGFloat = 64
+    var fontSize: CGFloat = 26
     let action: () -> Void
 
     @State private var pressed = false
@@ -11,10 +13,11 @@ struct RepeatButton: View {
 
     var body: some View {
         Image(systemName: systemImage)
-            .font(.system(size: 34, weight: .bold))
+            .font(.system(size: fontSize, weight: .bold))
             .foregroundStyle(.white)
-            .frame(width: 84, height: 84)
-            .background(Circle().fill(pressed ? Color(white: 0.30) : Color(white: 0.14)))
+            .frame(width: size, height: size)
+            .background(Circle().fill(pressed ? Color(white: 0.28) : Color(white: 0.13)))
+            .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
             .scaleEffect(pressed ? 0.92 : 1.0)
             .animation(.easeOut(duration: 0.1), value: pressed)
             .contentShape(Circle())
@@ -50,6 +53,7 @@ struct RepeatButton: View {
             var ticks = 0
             while !Task.isCancelled {
                 action()
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 ticks += 1
                 if ticks == 6 { interval = 70_000_000 }
                 if ticks == 20 { interval = 40_000_000 }

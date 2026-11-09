@@ -50,6 +50,11 @@ final class MetronomeEngine {
     private var queuedBuffers = 0
     private var queuedFrames: Int64 = 0
 
+    // 节拍回调与发声队列（由硬件 dataConsumed 回调严格驱动）
+    var onBeat: ((_ sequence: Int, _ beatInBar: Int, _ isAccent: Bool) -> Void)?
+    private var beatSequence: Int = 0
+    private var queuedBeats: [(sequence: Int, beatInBar: Int, isAccent: Bool)] = []
+
     private var clicks: [ClickSound: [Bool: [Float]]] = [:]
     private var configObserver: NSObjectProtocol?
 
@@ -126,6 +131,8 @@ final class MetronomeEngine {
             framesScheduled = 0
             framesExact = 0
             beatIndex = 0
+            beatSequence = 0
+            queuedBeats.removeAll()
         }
     }
 
@@ -135,7 +142,7 @@ final class MetronomeEngine {
             let tSec = Double(consumedFrames) / sampleRate
             switch mode {
             case .fixed:
-                return (fixedBPM, 0, false)
+                return (fixedBPM, tSec, false)
             case .progressive:
                 if progDurationSec <= 0 {
                     return (progTargetBPM, 0, true)
@@ -159,9 +166,17 @@ final class MetronomeEngine {
             framesExact = Double(consumedFrames)
             queuedBuffers = 0
             queuedFrames = 0
+            queuedBeats.removeAll()
             player.stop()
             player.play()
             fill()
+
+            // 派发首拍事件（首拍随 player.play() 立即在硬件发声）
+            if let first = queuedBeats.first {
+                DispatchQueue.main.async {
+                    self.onBeat?(first.sequence, first.beatInBar, first.isAccent)
+                }
+            }
         }
     }
 
@@ -171,6 +186,7 @@ final class MetronomeEngine {
             generation += 1
             queuedBuffers = 0
             queuedFrames = 0
+            queuedBeats.removeAll()
             player.stop()
             // 将调度游标回退对齐到用户实际耳朵听到的已消费采样点
             framesScheduled = consumedFrames
@@ -212,7 +228,12 @@ final class MetronomeEngine {
         framesScheduled = nextStart
 
         let isAccent = accentEnabled && (beatIndex % 4 == 0)
+        let beatInBar = beatIndex % 4
         beatIndex = (beatIndex + 1) % 4
+        beatSequence += 1
+        let seq = beatSequence
+
+        queuedBeats.append((sequence: seq, beatInBar: beatInBar, isAccent: isAccent))
 
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(length)),
               let dest = buffer.floatChannelData?[0] else { return }
@@ -243,6 +264,17 @@ final class MetronomeEngine {
                 self.consumedFrames += Int64(length)
                 self.queuedBuffers -= 1
                 self.queuedFrames -= Int64(length)
+
+                // 当前拍 buffer 消费完毕，下一拍紧接着在硬件发声
+                if !self.queuedBeats.isEmpty {
+                    self.queuedBeats.removeFirst()
+                }
+                if let nextBeat = self.queuedBeats.first {
+                    DispatchQueue.main.async {
+                        self.onBeat?(nextBeat.sequence, nextBeat.beatInBar, nextBeat.isAccent)
+                    }
+                }
+
                 self.fill()
             }
         }

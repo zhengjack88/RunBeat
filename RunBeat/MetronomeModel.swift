@@ -95,7 +95,11 @@ final class MetronomeModel {
     private(set) var isPlaying = false
     private(set) var displayBPM: Int = 180
     private(set) var progElapsedSeconds: Double = 0
+    private(set) var totalPlaybackSeconds: Double = 0
     private(set) var isProgCompleted = false
+    private(set) var beatPulseCount: Int = 0
+    private(set) var currentBeatInBar: Int = 0
+    private(set) var isCurrentBeatAccent: Bool = false
     var errorMessage: String?
 
     @ObservationIgnored private let engine = MetronomeEngine()
@@ -145,6 +149,15 @@ final class MetronomeModel {
         engine.setSound(sound)
         engine.setAccentEnabled(accentEnabled)
 
+        engine.onBeat = { [weak self] sequence, beatInBar, isAccent in
+            Task { @MainActor [weak self] in
+                guard let self, self.isPlaying else { return }
+                self.beatPulseCount = sequence
+                self.currentBeatInBar = beatInBar
+                self.isCurrentBeatAccent = isAccent
+            }
+        }
+
         displayBPM = (mode == .fixed) ? bpm : progStartBPM
 
         registerSessionObservers()
@@ -158,6 +171,7 @@ final class MetronomeModel {
         let status = engine.currentStatus()
         displayBPM = Int(status.currentBPM.rounded())
         progElapsedSeconds = status.elapsedSeconds
+        totalPlaybackSeconds = status.elapsedSeconds
         isProgCompleted = status.isCompleted
     }
 
@@ -195,7 +209,9 @@ final class MetronomeModel {
     func resetProgress() {
         engine.resetProgress()
         progElapsedSeconds = 0
+        totalPlaybackSeconds = 0
         isProgCompleted = false
+        beatPulseCount = 0
         displayBPM = (mode == .fixed) ? bpm : progStartBPM
     }
 
@@ -232,6 +248,7 @@ final class MetronomeModel {
                 } else {
                     self.displayBPM = self.bpm
                 }
+                self.totalPlaybackSeconds = status.elapsedSeconds
                 try? await Task.sleep(nanoseconds: 80_000_000) // 80ms 刷新率
             }
         }
